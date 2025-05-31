@@ -1,0 +1,7 @@
+opencsv
+pandas
+numpy
+matplotlib
+tensorflow
+scikit-learn
+openpyxl

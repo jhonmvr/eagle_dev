@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+env/
+venv/
+ENV/
+env.bak/
+.venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# PyInstaller
+*.spec
+
+# VS Code / IDEs
+.vscode/
+.idea/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Unit test / coverage reports
+.coverage
+.tox/
+.nox/
+.pytest_cache/
+htmlcov/
+
+# Logs and local databases
+*.log
+*.sqlite3
+*.db
+
+# dotenv
+.env
+.env.*
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Model files
+*.h5
+*.tflite
+*.onnx
+*.ckpt
+*.pb
+*.pt
+
+# Metadata
+*.xls
+*.xlsx
+*.csv
+*.json
+*.png
+
+# TensorBoard logs
+logs/
