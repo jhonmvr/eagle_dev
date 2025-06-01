@@ -1,0 +1,4 @@
+MAC
+pyinstaller --onefile --windowed app.py --add-data "covid_multitask_model.keras:."
+Windows
+pyinstaller --onefile --windowed app.py --add-data "covid_multitask_model.keras;."
