@@ -8,6 +8,12 @@ from tensorflow.keras.utils import Sequence
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense, Conv2D, UpSampling2D
+from keras.saving import save_model
+from tensorflow.keras.callbacks import CSVLogger
+
+
+csv_logger = CSVLogger('training_log.csv', append=False)
+
 
 # CONFIG
 IMG_SIZE = 224
@@ -120,5 +126,6 @@ model.compile(
     }
 )
 
-model.fit(train_gen, validation_data=val_gen, epochs=EPOCHS)
+model.fit(train_gen, validation_data=val_gen, epochs=EPOCHS, callbacks=[csv_logger])
 model.save("covid_multitask_model.h5")
+save_model(model, "covid_multitask_model.keras")
