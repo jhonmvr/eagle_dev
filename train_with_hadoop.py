@@ -9,29 +9,99 @@ from tensorflow.keras.utils import Sequence
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense, Conv2D, UpSampling2D
-from tensorflow.keras.callbacks import CSVLogger
-import matplotlib.pyplot as plt
-from dotenv import load_dotenv
+from keras.saving import save_model
+from tensorflow.keras.callbacks import Callback
+from datetime import datetime
+import csv
+import json
+import psutil
+from tensorflow.io import gfile
 
-# Load environment variables
-load_dotenv()
-IMG_SIZE = int(os.getenv("IMG_SIZE"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE"))
-EPOCHS = int(os.getenv("EPOCHS"))
-CLASSES = os.getenv("CLASSES").split(',')
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
+
+class ResourceLoggingCSVLogger(Callback):
+    def __init__(self, csv_filename='training_log.csv', jsonl_filename='epoch_logs.jsonl', append=False):
+        super().__init__()
+        self.csv_filename = csv_filename
+        self.jsonl_filename = jsonl_filename
+        self.append = append
+        self.writer = None
+        self.csv_file = None
+        self.keys = None
+
+    def on_train_begin(self, logs=None):
+        mode = 'a' if self.append else 'w'
+        self.csv_file = open(self.csv_filename, mode, newline='')
+        self.writer = None
+
+        if not self.append and os.path.exists(self.jsonl_filename):
+            os.remove(self.jsonl_filename)
+
+    def get_resource_usage(self):
+        cpu = psutil.cpu_percent()
+        mem = psutil.virtual_memory().percent
+        gpu_load, gpu_mem = (None, None)
+        if GPU_AVAILABLE:
+            gpus = GPUtil.getGPUs()
+            if gpus:
+                gpu_load = gpus[0].load * 100
+                gpu_mem = gpus[0].memoryUtil * 100
+        return cpu, mem, gpu_load, gpu_mem
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        cpu, mem, gpu, gpu_mem = self.get_resource_usage()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        full_logs = {
+            'epoch': epoch,
+            'timestamp': timestamp,
+            'cpu_percent': cpu,
+            'ram_percent': mem,
+            'gpu_percent': gpu if gpu is not None else 'N/A',
+            'gpu_memory_percent': gpu_mem if gpu_mem is not None else 'N/A',
+        }
+        full_logs.update(logs)
+
+        if self.writer is None:
+            self.keys = list(full_logs.keys())
+            self.writer = csv.DictWriter(self.csv_file, fieldnames=self.keys)
+            if not self.append or os.stat(self.csv_filename).st_size == 0:
+                self.writer.writeheader()
+
+        self.writer.writerow(full_logs)
+        self.csv_file.flush()
+
+        with open(self.jsonl_filename, 'a') as jf:
+            json.dump(full_logs, jf)
+            jf.write('\n')
+
+    def on_train_end(self, logs=None):
+        self.csv_file.close()
+
+csv_logger = ResourceLoggingCSVLogger(
+    csv_filename='training_log.csv',
+    jsonl_filename='epoch_logs.jsonl',
+    append=False
+)
+
+IMG_SIZE = 224
+BATCH_SIZE = 8
+EPOCHS = 10
+CLASSES = ['COVID', 'Normal', 'Viral_Pneumonia']
 CLASS_TO_INDEX = {name: i for i, name in enumerate(CLASSES)}
-DATASET_ROOT = os.getenv("DATASET_ROOT")
-MODEL_PATH = os.getenv("MODEL_PATH")
-TRAINING_LOG = os.getenv("TRAINING_LOG")
+DATASET_ROOT = 'hdfs://192.168.100.5:9000/user/jhon/dataset'
 
-# FUNCIONES PARA HDFS
 def load_image_from_hdfs(hdfs_path):
-    with tf.io.gfile.GFile(hdfs_path, 'rb') as f:
+    with gfile.GFile(hdfs_path, 'rb') as f:
         return Image.open(BytesIO(f.read()))
 
-# DATA GENERATOR
 class MultiTaskDataGenerator(Sequence):
-    def __init__(self, df, batch_size=BATCH_SIZE, shuffle=True):
+    def __init__(self, df, batch_size=8, shuffle=True):
         self.df = df.reset_index(drop=True)
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -71,26 +141,22 @@ class MultiTaskDataGenerator(Sequence):
         if self.shuffle:
             np.random.shuffle(self.indexes)
 
-# METADATA
-
 def load_metadata(dataset_root=DATASET_ROOT):
     all_data = []
     for class_name in CLASSES:
-        meta_file = os.path.join(dataset_root, f"{class_name}.metadata.xlsx")
-        with tf.io.gfile.GFile(meta_file, 'rb') as f:
+        meta_file_path = f"{dataset_root}/{class_name}.metadata.xlsx"
+        with gfile.GFile(meta_file_path, 'rb') as f:
             df = pd.read_excel(BytesIO(f.read()))
         for _, row in df.iterrows():
             filename = f"{row['FILE NAME']}.png"
-            image_path = os.path.join(dataset_root, class_name, 'images', filename)
-            mask_path = os.path.join(dataset_root, class_name, 'masks', filename)
+            image_path = f"{dataset_root}/{class_name}/images/{filename}"
+            mask_path = f"{dataset_root}/{class_name}/masks/{filename}"
             all_data.append({
                 'image_path': image_path,
                 'mask_path': mask_path,
                 'label': CLASS_TO_INDEX[class_name]
             })
     return pd.DataFrame(all_data)
-
-# MODEL
 
 def build_model():
     base = MobileNetV2(include_top=False, weights='imagenet', input_shape=(IMG_SIZE, IMG_SIZE, 3))
@@ -100,7 +166,7 @@ def build_model():
 
     x_cls = GlobalAveragePooling2D()(x)
     x_cls = Dropout(0.3)(x_cls)
-    out_class = Dense(len(CLASSES), activation='softmax', name='classification')(x_cls)
+    out_class = Dense(3, activation='softmax', name='classification')(x_cls)
 
     x_seg = UpSampling2D(size=2)(x)
     x_seg = Conv2D(64, 3, padding='same', activation='relu')(x_seg)
@@ -113,14 +179,13 @@ def build_model():
 
     return Model(inputs=inputs, outputs=[out_class, out_mask])
 
-# MAIN
 strategy = tf.distribute.MultiWorkerMirroredStrategy()
 
 with strategy.scope():
     df_all = load_metadata(DATASET_ROOT)
     df_train, df_val = train_test_split(df_all, test_size=0.2, random_state=42)
-    train_gen = MultiTaskDataGenerator(df_train)
-    val_gen = MultiTaskDataGenerator(df_val, shuffle=False)
+    train_gen = MultiTaskDataGenerator(df_train, batch_size=BATCH_SIZE, shuffle=True)
+    val_gen = MultiTaskDataGenerator(df_val, batch_size=BATCH_SIZE, shuffle=False)
 
     model = build_model()
     model.compile(
@@ -135,40 +200,6 @@ with strategy.scope():
         }
     )
 
-    csv_logger = CSVLogger(TRAINING_LOG, append=False)
-
     model.fit(train_gen, validation_data=val_gen, epochs=EPOCHS, callbacks=[csv_logger])
-    model.save(MODEL_PATH)
-
-# PLOTTING
-log_df = pd.read_csv(TRAINING_LOG)
-
-plt.figure()
-plt.plot(log_df['classification_accuracy'], label='train_accuracy')
-plt.plot(log_df['val_classification_accuracy'], label='val_accuracy')
-plt.title('Accuracy (Classification)')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.legend()
-plt.grid(True)
-plt.savefig('accuracy_plot.png')
-
-plt.figure()
-plt.plot(log_df['loss'], label='train_loss')
-plt.plot(log_df['val_loss'], label='val_loss')
-plt.title('Loss (Total)')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid(True)
-plt.savefig('loss_plot.png')
-
-plt.figure()
-plt.plot(log_df['segmentation_loss'], label='train_seg_loss')
-plt.plot(log_df['val_segmentation_loss'], label='val_seg_loss')
-plt.title('Loss (Segmentation)')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid(True)
-plt.savefig('segmentation_loss_plot.png')
+    model.save("covid_multitask_model.h5")
+    save_model(model, "covid_multitask_model.keras")
